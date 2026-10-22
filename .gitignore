@@ -1,0 +1,6 @@
+datos.json
+public/
+corrida.log
+__pycache__/
+.vercel/
+node_modules/

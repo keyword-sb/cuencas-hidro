@@ -1,0 +1,29 @@
+name: Datos de cuencas
+on:
+  schedule:
+    - cron: "10 * * * *"   # cada hora, a los 10 min (CELEC ya publicó la hora anterior)
+  workflow_dispatch: {}
+concurrency: tablero
+jobs:
+  correr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python3 hidro.py
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      # Publica solo public/datos.json en el proyecto de Vercel cuencas-hidro (team adm1n-s-projects).
+      # El módulo "Cuencas" del Monitor Energía de Keyword lo lee desde ahí.
+      - name: Publicar en Vercel
+        run: npx --yes vercel@65.1.0 deploy public --prod --yes --token "$VERCEL_TOKEN"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      # Si alguna fuente falló, los datos igual se publican con lo demás, pero la corrida queda en rojo
+      # y GitHub manda correo.
+      - name: Revisar fuentes
+        run: python3 -c "import json,sys; e=json.load(open('datos.json'))['errores']; print(json.dumps(e, indent=1, ensure_ascii=False)); sys.exit(1 if e else 0)"
