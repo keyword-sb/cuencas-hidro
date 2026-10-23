@@ -1,7 +1,8 @@
 name: Datos de cuencas
 on:
   schedule:
-    - cron: "10 * * * *"   # cada hora, a los 10 min (CELEC ya publicó la hora anterior)
+    # A los 37 min: GitHub atrasa o salta los cron cerca de la hora en punto (con :10 corría cada ~5 h).
+    - cron: "37 * * * *"
   workflow_dispatch: {}
 concurrency: tablero
 jobs:
