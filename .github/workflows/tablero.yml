@@ -1,8 +1,12 @@
 name: Datos de cuencas
 on:
   schedule:
-    # A los 37 min: GitHub atrasa o salta los cron cerca de la hora en punto (con :10 corría cada ~5 h).
-    - cron: "37 * * * *"
+    # Horas en UTC (Ecuador = UTC-5). A los :07 y :37: GitHub atrasa o salta los cron cerca de la hora en punto
+    # (con :10 corría cada ~5 h).
+    # De día (06:00 a 22:00 de Ecuador), cada 30 min, lo que tarda CENACE en actualizar.
+    - cron: "7,37 0-2,11-23 * * *"
+    # De noche casi nadie lo ve: cada 2 h (23:37, 01:37, 03:37 y 05:37 de Ecuador). 36 corridas al día en total.
+    - cron: "37 4,6,8,10 * * *"
   workflow_dispatch: {}
 concurrency: tablero
 jobs:
@@ -13,7 +17,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
+      # historial_cenace.json guarda las lecturas anteriores de CENACE: restando dos lecturas del mismo día sale la
+      # producción actual. Cada corrida empieza limpia, así que se trae el de la corrida anterior. Un caché no se puede
+      # sobrescribir: cada corrida guarda uno nuevo y se restaura el más reciente con el prefijo.
+      - name: Traer historial de CENACE
+        uses: actions/cache/restore@v4
+        with:
+          path: historial_cenace.json
+          key: historial-cenace-${{ github.run_id }}
+          restore-keys: historial-cenace-
       - run: python3 hidro.py
+      - name: Guardar historial de CENACE
+        if: always() && hashFiles('historial_cenace.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: historial_cenace.json
+          key: historial-cenace-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: actions/setup-node@v4
         with: { node-version: "22" }
       # Publica solo public/datos.json en el proyecto de Vercel cuencas-hidro (team adm1n-s-projects).

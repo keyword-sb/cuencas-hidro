@@ -4,3 +4,4 @@ corrida.log
 __pycache__/
 .vercel/
 node_modules/
+historial_cenace.json

@@ -17,10 +17,12 @@ Fuentes (todas públicas, sin clave):
     del tramo (el ícono del visor es el peor de 51 escenarios y exagera).
   * Alertas meteorológicas del INAMHI.
 - INAMHI api_visor (inamhi.gob.ec/info): pluviómetros y limnígrafos (nivel de río) que están transmitiendo.
+- CENACE (cenace.gob.ec/info-operativa): energía despachada en el día por central, en tiempo real (cada ~30 min).
 """
 
 import csv
 import gzip
+import base64
 import io
 import json
 import math
@@ -39,6 +41,15 @@ UA = {"User-Agent": "monitoreo-hidro (tablero público de cuencas)"}
 GEO = "https://services.geoglows.org"
 CELEC = "https://generacioncsr.celec.gob.ec:8443/ords/csr/sardomcsr/pointValues"
 INAMHI = "https://inamhi.gob.ec/api_visor"
+CENACE = "https://www.cenace.gob.ec/info-operativa/InformacionOperativa.htm"
+SECTIGO_INTERMEDIO = "http://crt.sectigo.com/SectigoPublicServerAuthenticationCADVR36.crt"  # ver contexto_cenace
+# Nombres del gráfico "Detalle de producción" de CENACE en tiempo real → id de la central ("Paute" es Molino).
+CENACE_NOMBRES = {"Coca Codo": "ccs", "Paute": "molino", "Mazar": "mazar", "Sopladora": "sopladora",
+                  "Minas San Francisco": "msf", "Agoyán": "agoyan", "Delsitanisagua": "delsi"}
+# Lecturas anteriores de CENACE: restando dos lecturas del mismo día sale la energía despachada en ese intervalo.
+HISTORIAL_CENACE = os.path.join(AQUI, "historial_cenace.json")
+MESES = {m: i + 1 for i, m in enumerate(["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto",
+                                          "septiembre", "octubre", "noviembre", "diciembre"])}
 ECUADOR = timezone(timedelta(hours=-5))
 CAJA = (-80.2, -4.4, -77.2, 0.4)  # oeste, sur, este, norte: todas las cuencas
 
@@ -55,23 +66,55 @@ CUENCAS = {
     "agoyan": "Agoyán - San Francisco",
     "delsintanisagua": "Delsitanisagua",
     "marcel_laniado": "Marcel Laniado (Daule Peripa)",
-    "due": "Due",
 }
 
-# Potencia: capa "hidroeléctricas mayores a 50 MW" del visor INAMHI. celec_*: códigos de sus gráficas de producción.
+# Cómo opera Coca Codo según el caudal del río: cruce de caudal y potencia horarios de CELEC, 2021-oct 2026
+# (~49.500 horas; se descartan 64 días con potencia 0 todo el día y caudal turbinado normal, que son datos que
+# no llegaron). Parada = 0 unidades en línea y ≤ 20 MW.
+# - plena: río desde el que turbina los 222 m³/s de diseño (+20 m³/s de caudal ecológico). Saca ~5,2 MW por m³/s
+#   turbinado: ~1.200 MW típicos, 1.451 MW como máximo horario; nunca llegó a 1.500.
+# - riesgo6h: [desde, hasta, % de veces que la apagaron en las 6 h siguientes estando generando] según el caudal.
+#   Lo que más pesa es el nivel del río.
+# - subida: la velocidad de subida solo suma riesgo entre 450 y 800 m³/s. Si sube más de 100 m³/s por hora
+#   (media de 3 h), la apagan ~10 % de las veces (0,4 % si no sube).
+# - duracion: con el río sobre 1.000 m³/s, el riesgo crece con las horas que lleva así (el sedimento se acumula):
+#   9 % en las primeras 6 h, 14 % de 6 a 24 h, 24 % pasado un día.
+# - curva: [caudal del río, MW típicos (mediana de las horas generando)].
+# - curva_turbinado: [caudal turbinado, MW típicos]. Sirve para estimar la producción en las horas en que CELEC no
+#   publica la potencia: con los dos datos publicados, el error típico es ±57 MW (80 % de las horas, < 127 MW).
+OPERACION_CCS = dict(
+    plena=242,
+    riesgo6h=[[0, 450, 0.4], [450, 800, 1], [800, 1000, 7], [1000, 1500, 10], [1500, 99999, 35]],
+    subida=dict(desde=450, hasta=800, m3s_hora=100, riesgo=10),
+    duracion=dict(caudal=1000, tramos=[[0, 6, 9], [6, 24, 14], [24, 99999, 24]]),
+    curva=[[90, 379], [110, 481], [130, 599], [150, 684], [170, 772], [190, 861], [211, 951], [236, 1032],
+           [275, 1057], [350, 1054], [450, 1050], [600, 1051], [850, 976], [1250, 753], [1800, 605]],
+    curva_turbinado=[[50, 355], [70, 396], [90, 500], [110, 601], [130, 701], [150, 744], [170, 902], [190, 1003],
+                     [210, 1098], [230, 1192]],
+)
+
+# mw: capa "hidroeléctricas mayores a 50 MW" del visor INAMHI. caudal, cota, potencia y unidades: códigos (mrid) de
+# CELEC Sur, los de sus gráficas de producción. potencia es una tupla porque Molino viene en dos fases (AB y C) que se
+# suman. turbinado (solo Coca Codo): caudal que pasa por las turbinas. Cada código de potencia se validó contra la energía diaria de CELEC (repDiaEnerAyerHoy). Sin dato público de potencia:
+# Pucará, Delsitanisagua y Marcel Laniado.
 CENTRALES = [
     dict(id="ccs", nombre="Coca Codo Sinclair", mw=1500, cuenca="coca", geoglows="Coca Codo Sinclair",
-         caudal=100037, cota=100540, embalse="Embalse compensador", rio="Río Coca (Quijos + Salado)"),
+         caudal=100037, cota=100540, embalse="Embalse compensador", rio="Río Coca (Quijos + Salado)",
+         potencia=(100501,), unidades=100503, turbinado=100538, operacion=OPERACION_CCS),
     dict(id="mazar", nombre="Mazar", mw=183, cuenca="paute", geoglows="Mazar",
-         caudal=30538, cota=30031, embalse="Embalse Mazar", rio="Río Paute"),
+         caudal=30538, cota=30031, embalse="Embalse Mazar", rio="Río Paute", potencia=(30501,), unidades=30503),
     dict(id="molino", nombre="Paute-Molino", mw=1075, cuenca="paute", geoglows="Amaluza",
-         caudal=24811, cota=24019, embalse="Embalse Amaluza", rio="Río Paute"),
+         caudal=24811, cota=24019, embalse="Embalse Amaluza", rio="Río Paute",
+         potencia=(44826, 44827), unidades=44822),
     dict(id="sopladora", nombre="Sopladora", mw=487, cuenca="paute", geoglows=None,
-         caudal=90537, cota=90919, embalse=None, rio="Río Paute (agua que sale de Molino)"),
+         caudal=90537, cota=90919, embalse=None, rio="Río Paute (agua que sale de Molino)",
+         potencia=(90501,), unidades=90503),
     dict(id="msf", nombre="Minas San Francisco", mw=270, cuenca="jubones", geoglows="Minas San Francisco",
-         caudal=650538, cota=650919, embalse="Embalse Minas", rio="Río Jubones"),
+         caudal=650538, cota=650919, embalse="Embalse Minas", rio="Río Jubones",
+         potencia=(650501,), unidades=650503),
     dict(id="agoyan", nombre="Agoyán", mw=160, cuenca="agoyan", geoglows="Agoyán",
-         caudal=140537, cota=140031, embalse="Embalse Agoyán", rio="Río Pastaza"),
+         caudal=140537, cota=140031, embalse="Embalse Agoyán", rio="Río Pastaza",
+         potencia=(140501,), unidades=140503),
     dict(id="pisayambo", nombre="Pucará (embalse Pisayambo)", mw=73, cuenca=None, geoglows="Pisayambo",
          caudal=None, cota=None, embalse=None, rio="Río Pisayambo"),
     dict(id="delsi", nombre="Delsitanisagua", mw=180, cuenca="delsintanisagua", geoglows="Delsitanisagua",
@@ -79,9 +122,8 @@ CENTRALES = [
     dict(id="laniado", nombre="Marcel Laniado", mw=213, cuenca="marcel_laniado", geoglows="Daule Peripa",
          caudal=None, cota=None, embalse="Embalse Daule Peripa", rio="Río Daule"),
     dict(id="manduriacu", nombre="Manduriacu", mw=63.4, cuenca=None, geoglows=None,
-         caudal=110537, cota=110031, embalse="Embalse Manduriacu", rio="Río Guayllabamba"),
-    dict(id="due", nombre="Due", mw=64.3, cuenca="due", geoglows=None, caudal=None, cota=None, embalse=None,
-         rio="Río Due"),
+         caudal=110537, cota=110031, embalse="Embalse Manduriacu", rio="Río Guayllabamba",
+         potencia=(110501,), unidades=110503),
 ]
 
 
@@ -99,6 +141,15 @@ def pedir(url, datos=None, timeout=90, tls_laxo=False):
     with urllib.request.urlopen(urllib.request.Request(url, data=datos, headers=cab), timeout=timeout,
                                 context=contexto) as r:
         return r.read()
+
+
+def contexto_cenace():
+    """CENACE no manda el certificado intermedio de Sectigo. Se baja de la dirección que indica su propio certificado
+    y se agrega a las raíces del sistema: la cadena se sigue verificando completa."""
+    import ssl
+    contexto = ssl.create_default_context()
+    contexto.load_verify_locations(cadata=pedir(SECTIGO_INTERMEDIO, timeout=30))
+    return contexto
 
 
 def iso(t):
@@ -328,6 +379,77 @@ def celec_semana(mrid, ahora):
         a = datetime(dia.year, dia.month, dia.day, 1, tzinfo=ECUADOR)
         serie += celec(mrid, a, a + timedelta(days=1))
     return sorted(dict(serie).items())
+
+
+def celec_suma(mrids, ahora):
+    """Suma horaria de varias series (Molino: fases AB y C). Solo las horas que trae cada una de ellas."""
+    series = [dict(celec_semana(m, ahora)) for m in mrids]
+    horas = sorted(set.intersection(*(set(s) for s in series)))
+    return [(h, round(sum(s[h] for s in series), 2)) for h in horas]
+
+
+def plotly_figuras(html):
+    """Las trazas de cada Plotly.newPlot(...) de una página: [[{name, type, x, y}, ...], ...]."""
+    dec, figs = json.JSONDecoder(), []
+    for m in re.finditer(r'Plotly\.newPlot\(\s*"[^"]+",\s*', html):
+        figs.append(dec.raw_decode(html, m.end())[0])
+    return figs
+
+
+def plotly_valores(v):
+    """Plotly guarda a veces los números en binario: {"dtype": "f8", "bdata": base64}."""
+    if isinstance(v, dict):
+        b = base64.b64decode(v["bdata"])
+        return list(struct.unpack(f"<{len(b) // 8}d", b))
+    return v
+
+
+def cenace_tiempo_real():
+    """Bloque "Producción en tiempo real" de CENACE: energía despachada en el día por central (MWh) y la hora hasta
+    la que llega (fin de la última media hora de su curva de generación). La página se regenera cada ~30 min."""
+    req = urllib.request.Request(CENACE, headers=UA)
+    with urllib.request.urlopen(req, timeout=90, context=contexto_cenace()) as r:
+        s = r.read().decode("utf-8", "replace")
+    bloque = s[s.index("PRODUCCIÓN EN TIEMPO REAL"):s.index("DEMANDAS EMPRESAS")]
+    d = re.search(r"(\d{1,2}) de (\w+) de (\d{4})", bloque)
+    mwh, hh = {}, None
+    for traza in (t for f in plotly_figuras(bloque) for t in f):
+        nombre = (traza.get("name") or "").strip()
+        if traza.get("type") == "bar" and nombre in CENACE_NOMBRES:
+            mwh[CENACE_NOMBRES[nombre]] = float(plotly_valores(traza["y"])[0])
+        if nombre == "PRODUCCIÓN TOTAL":
+            v = plotly_valores(traza["y"])
+            hh = traza["x"][max(i for i, x in enumerate(v) if x is not None and not math.isnan(x))]
+    hora, minuto = map(int, hh.split(":"))
+    hasta = datetime(int(d.group(3)), MESES[d.group(2).lower()], int(d.group(1)), hora, minuto,
+                     tzinfo=ECUADOR) + timedelta(minutes=30)
+    return {"hasta": iso(hasta), "mwh": mwh}
+
+
+def cenace_produccion(ahora):
+    """Por central: energía del día (MWh), promedio desde las 00:00 y, si hay una lectura anterior del mismo día,
+    la potencia media despachada entre las dos lecturas (MW). Guarda las lecturas de las últimas 48 h."""
+    actual = cenace_tiempo_real()
+    try:
+        hist = json.load(open(HISTORIAL_CENACE))
+    except (OSError, ValueError):
+        hist = []
+    hist = [h for h in hist if h["hasta"] != actual["hasta"] and ahora - fecha(h["hasta"]) < timedelta(hours=48)]
+    t1 = fecha(actual["hasta"])
+    dia = t1.astimezone(ECUADOR).date()
+    previa = max((h for h in hist if fecha(h["hasta"]) < t1 and fecha(h["hasta"]).astimezone(ECUADOR).date() == dia),
+                 key=lambda h: h["hasta"], default=None)
+    with open(HISTORIAL_CENACE, "w") as f:
+        json.dump(hist + [actual], f)
+    horas_dia = (t1 - datetime(dia.year, dia.month, dia.day, tzinfo=ECUADOR)).total_seconds() / 3600
+    out = {}
+    for cid, e in actual["mwh"].items():
+        r = {"hasta": actual["hasta"], "mwh_hoy": round(e, 1), "mw_prom_hoy": round(e / horas_dia, 1)}
+        if previa and cid in previa["mwh"]:
+            dh = (t1 - fecha(previa["hasta"])).total_seconds() / 3600
+            r["desde"], r["mw"] = previa["hasta"], round(max(0.0, e - previa["mwh"][cid]) / dh, 1)
+        out[cid] = r
+    return out
 
 
 def geoglows_central(nombre, hoy):
@@ -618,8 +740,9 @@ def correr():
         for c in rios:
             rios[c].sort(key=lambda r: -r["periodo"])
 
-    # Centrales: CELEC (caudal y cota horarios) + visor INAMHI (registro diario y pronóstico).
+    # Centrales: CELEC (caudal y cota horarios) + visor INAMHI (registro diario y pronóstico) + CENACE (despacho).
     print("Centrales...")
+    cenace = intentar("cenace", cenace_produccion, ahora) or {}
     centrales = []
     for cen in CENTRALES:
         print(f"  {cen['nombre']}")
@@ -628,6 +751,13 @@ def correr():
             dato["celec_caudal"] = intentar(f"celec caudal {cen['id']}", celec_semana, cen["caudal"], ahora)
         if cen["cota"]:
             dato["celec_cota"] = intentar(f"celec cota {cen['id']}", celec_semana, cen["cota"], ahora)
+        if cen.get("potencia"):
+            dato["celec_potencia"] = intentar(f"celec potencia {cen['id']}", celec_suma, cen["potencia"], ahora)
+            dato["celec_unidades"] = intentar(f"celec unidades {cen['id']}", celec_semana, cen["unidades"], ahora)
+        if cen["id"] in cenace:
+            dato["cenace"] = cenace[cen["id"]]
+        if cen.get("turbinado"):  # Coca Codo: distingue una parada real de un día que CELEC aún no publica
+            dato["celec_turbinado"] = intentar(f"celec turbinado {cen['id']}", celec_semana, cen["turbinado"], ahora)
         if cen["geoglows"]:
             dato["visor"] = intentar(f"visor {cen['id']}", geoglows_central, cen["geoglows"], hoy)
             st = intentar(f"punto {cen['id']}", lambda n: json.loads(pedir(
@@ -641,7 +771,7 @@ def correr():
     capa = json.loads(pedir(f"{GEO}/geoserver/ecuador/ows?service=WFS&version=2.0.0&request=GetFeature"
                             f"&typeNames=ecuador:hidroelectricas_mayores_50W&outputFormat=application/json"
                             f"&srsName=EPSG:4326", timeout=120))
-    nombres = {"sopladora": "Sopladora", "manduriacu": "Manduriacu", "due": "Due", "molino": "Paute-Molino",
+    nombres = {"sopladora": "Sopladora", "manduriacu": "Manduriacu", "molino": "Paute-Molino",
                "ccs": "Coca-Codo Sinclair", "agoyan": "Agoyan", "laniado": "Marcel Laniado"}
     for d in centrales:
         if "lat" not in d and d["id"] in nombres:
