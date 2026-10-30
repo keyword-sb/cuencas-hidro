@@ -43,7 +43,7 @@ jobs:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-      # Si alguna fuente falló, los datos igual se publican con lo demás, pero la corrida queda en rojo
-      # y GitHub manda correo.
+      # Si alguna fuente falló, los datos igual se publican con lo demás. La corrida queda en rojo (y GitHub manda
+      # correo) solo si cayó CELEC o CENACE; las demás fuentes quedan listadas en el log y en datos.json → errores.
       - name: Revisar fuentes
-        run: python3 -c "import json,sys; e=json.load(open('datos.json'))['errores']; print(json.dumps(e, indent=1, ensure_ascii=False)); sys.exit(1 if e else 0)"
+        run: python3 -c "import json,sys; e=json.load(open('datos.json'))['errores']; print(json.dumps(e, indent=1, ensure_ascii=False)); sys.exit(1 if any(k.startswith(('celec','cenace')) for k in e) else 0)"

@@ -112,7 +112,7 @@ jobs:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-      - name: Revisar fuentes   # rojo si alguna fuente falló
+      - name: Revisar fuentes   # rojo si cayó CELEC o CENACE
         run: python3 -c "..."
 ```
 
@@ -124,7 +124,8 @@ Queda en `https://<proyecto>.vercel.app`; el dominio propio se agrega en Setting
   extranjeras, la corrida sigue pero sin caudal ni cota de CELEC (queda anotado en `datos.json → errores`).
 - Que `datos.json → errores` esté vacío. Una fuente caída no rompe la corrida: la página muestra lo demás y lista
   qué falló al pie.
-- El último paso del workflow ("Revisar fuentes") pone la corrida en rojo si `errores` no está vacío, así GitHub manda correo.
+- El último paso del workflow ("Revisar fuentes") pone la corrida en rojo solo si `errores` trae una fuente de CELEC o
+  CENACE, así GitHub manda correo. Las demás (INAMHI, visor, satélite) quedan listadas en el log y en `errores`.
 
 ## 4. Recomendaciones
 
