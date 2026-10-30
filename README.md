@@ -1,7 +1,7 @@
 # Cuencas hidroeléctricas del Ecuador: guía de despliegue
 
 > **Cómo quedó en Keyword (2026-10-22).** Este repo solo *recolecta*: GitHub Actions corre `hidro.py` cada 30 min de día y
-> cada 2 h de noche (hora de Ecuador), y publica `public/datos.json` en el proyecto de Vercel `cuencas-hidro` (team `adm1n-s-projects`). La página la dibuja
+> cada 2 h de noche (hora de Ecuador), disparado por un cron externo (cron-job.org), y publica `public/datos.json` en el proyecto de Vercel `cuencas-hidro` (team `adm1n-s-projects`). La página la dibuja
 > el módulo **"Cuencas Hidroeléctricas"** del Monitor Energía de Keyword (archivos `cuencas.js` y `api/cuencas.js`
 > de ese proyecto), que lee ese JSON vía la variable `CUENCAS_DATA_URL`. El detalle de en qué sitios está el módulo
 > vive en el `CLAUDE.md` del monitor, no aquí (este repo es público).
@@ -25,7 +25,7 @@ Todo usa fuentes públicas, sin claves ni costo.
 |---|---|
 | `hidro.py` | Recolector. Una corrida baja todas las fuentes, cruza los datos por cuenca y genera la página. Solo usa la biblioteca estándar de Python 3.9+ (no hay `requirements.txt`). Tarda ~2,5 min. |
 | `provincias.json` | Contorno de las provincias para el mapa (geoBoundaries ADM1, CC BY 4.0, simplificado). |
-| `.github/workflows/tablero.yml` | Corre `hidro.py` cada 30 min de 06:00 a 22:00 de Ecuador y cada 2 h de noche, y publica `public/` en Vercel. Conserva `historial_cenace.json` entre corridas con `actions/cache`. |
+| `.github/workflows/tablero.yml` | Corre `hidro.py` cada vez que lo dispara el cron externo (cada 30 min de 06:00 a 22:00 de Ecuador y cada 2 h de noche), y publica `public/` en Vercel. Conserva `historial_cenace.json` entre corridas con `actions/cache`. |
 | `historial_cenace.json` *(se genera)* | Lecturas de CENACE de las últimas 48 h. Restando dos lecturas del mismo día sale la producción actual (MW); sin él solo sale el acumulado del día. |
 | `datos.json` *(se genera)* | Salida de la última corrida (~180 KB). Útil para depurar. |
 | `public/datos.json` *(se genera)* | Copia de `datos.json`: **lo único que se sube a Vercel**. |

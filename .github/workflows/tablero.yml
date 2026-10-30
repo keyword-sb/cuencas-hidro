@@ -1,12 +1,8 @@
 name: Datos de cuencas
 on:
-  schedule:
-    # Horas en UTC (Ecuador = UTC-5). A los :07 y :37: GitHub atrasa o salta los cron cerca de la hora en punto
-    # (con :10 corría cada ~5 h).
-    # De día (06:00 a 22:00 de Ecuador), cada 30 min, lo que tarda CENACE en actualizar.
-    - cron: "7,37 0-2,11-23 * * *"
-    # De noche casi nadie lo ve: cada 2 h (23:37, 01:37, 03:37 y 05:37 de Ecuador). 36 corridas al día en total.
-    - cron: "37 4,6,8,10 * * *"
+  # Lo dispara un cron externo (cron-job.org) porque el `schedule` de GitHub se atrasaba o saltaba corridas (hasta 6 h).
+  # En hora de Ecuador: "7,37 6-21 * * *" de día, lo que tarda CENACE en actualizar, y "37 1,3,5,23 * * *" de noche.
+  # 36 corridas al día en total.
   workflow_dispatch: {}
 concurrency: tablero
 jobs:
